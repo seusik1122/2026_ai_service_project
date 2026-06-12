@@ -1,0 +1,30 @@
+# 웹 프레임워크
+fastapi==0.115.0
+uvicorn==0.30.0
+
+# DB
+supabase==2.7.0
+
+# 크롤링
+playwright==1.45.0
+beautifulsoup4==4.12.3
+requests==2.32.3
+fake-useragent==1.5.1
+
+# AI
+openai==2.40.0
+
+# 스케줄러
+apscheduler==3.10.4
+
+# 환경변수
+python-dotenv==1.0.1
+
+# 유틸
+pydantic==2.8.0
+httpx==0.27.0
+python-multipart==0.0.9
+
+# 테스트
+pytest==8.3.0
+pytest-asyncio==0.23.0
