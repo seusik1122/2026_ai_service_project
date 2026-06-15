@@ -23,3 +23,5 @@ dist/
 .DS_Store
 *.log
 nohup.out
+logs/
+backend/logs/
