@@ -4,6 +4,5 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 RUN playwright install chromium --with-deps
 COPY . .
-ENV PORT=8000
-EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE 8080
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"]
