@@ -1,116 +1,191 @@
-# 클래스101 크롤러
-# 대상 URL: https://class101.net/ko/categories
-# 주의: 가격 / 수강생 수는 로그인해야 노출됨 → 비공개값은 price=-1, student_count=None 처리
-#       (price=-1 은 '무료'(0)와 구분되는 '미수집/비공개' sentinel)
-#
-# ⚠️ CSS 셀렉터는 라이브 사이트 개발자 도구로 직접 확인이 필요하다.
-#    실제 마크업이 바뀌면 _SELECTORS 상수만 수정하면 된다.
+"""클래스101 크롤러 — 카테고리별 전체 강의 수집.
+
+방식: Playwright로 카테고리 목록 페이지 파싱
+- 카테고리 페이지에서 product 링크 + 카드 텍스트로 제목/강사/가격 추출
+- 카테고리 177개를 순회하되, 상위(부모) 카테고리만 수집해 중복 최소화
+"""
+import asyncio
+import random
 import re
 from typing import Optional
-
-from bs4 import BeautifulSoup
-
-from app.crawlers.base_crawler import BaseCrawler
+from playwright.async_api import async_playwright
+from app.db.queries import upsert_lecture, upsert_instructor
+from app.db.models import LectureCreate
 from app.utils.logger import logger
 
+# 주요 상위 카테고리 fallback (동적 수집 실패 시 사용)
+TOP_CATEGORIES = [
+    ("드로잉",          "https://class101.net/ko/categories/604f1c9756c3676f1ed00304"),
+    ("디지털 드로잉",   "https://class101.net/ko/categories/604f1c9756c3676f1ed0030e"),
+    ("일러스트",        "https://class101.net/ko/categories/613070fa5b76158cac88344a"),
+    ("공예",            "https://class101.net/ko/categories/604f1c9756c3676f1ed00317"),
+    ("요리 · 음료",     "https://class101.net/ko/categories/604f1c9756c3676f1ed00341"),
+    ("베이킹 · 디저트", "https://class101.net/ko/categories/604f1c9756c3676f1ed00346"),
+    ("음악",            "https://class101.net/ko/categories/604f1c9756c3676f1ed0034e"),
+    ("운동",            "https://class101.net/ko/categories/604f1c9756c3676f1ed00355"),
+    ("사진 · 영상",     "https://class101.net/ko/categories/604f1c9756c3676f1ed00362"),
+    ("글쓰기",          "https://class101.net/ko/categories/604f1c9756c3676f1ed00371"),
+    ("재테크",          "https://class101.net/ko/categories/604f1c9756c3676f1ed00375"),
+    ("자기계발",        "https://class101.net/ko/categories/604f1c9756c3676f1ed00380"),
+    ("IT · 개발",       "https://class101.net/ko/categories/604f1c9756c3676f1ed00385"),
+    ("디자인",          "https://class101.net/ko/categories/604f1c9756c3676f1ed00386"),
+    ("언어",            "https://class101.net/ko/categories/604f1c9756c3676f1ed00387"),
+    ("키즈",            "https://class101.net/ko/categories/604f1c9756c3676f1ed00388"),
+]
 
-def parse_lecture_price(price_text: str) -> tuple[int, bool]:
-    """가격 텍스트 파싱 → (price, is_free).
 
-    로그인 필요/미수집 등 비공개 시 (-1, False) 반환 (price=-1 = 비공개 sentinel).
-    클래스101은 유료 플랫폼이라 is_free 는 정상값에서도 False.
-    """
-    if not price_text or "로그인" in price_text or "원" not in price_text:
-        return -1, False
-    digits = re.sub(r"[^\d]", "", price_text)
-    if not digits:
-        return -1, False
-    return int(digits), False
-
-
-class Class101Crawler(BaseCrawler):
+class Class101Crawler:
     PLATFORM = "class101"
-    BASE_URL = "https://class101.net/ko/categories"
-
-    _SELECTORS = {
-        "card": "div.product_card",
-        "title": ".product_title",
-        "instructor": ".creator",
-        "category": ".category",
-        "price": ".price",
-        "tag": ".tag",
-        "link": "a",
-        "thumbnail": "img",
-    }
 
     async def crawl(self) -> list[dict]:
-        """카테고리 페이지를 수집해 DB에 저장. 수집 항목 리스트 반환."""
-        await self.init_browser()
         collected: list[dict] = []
-        try:
-            logger.info(f"클래스101 크롤링 시작: {self.BASE_URL}")
-            html = await self.fetch_page(self.BASE_URL, wait_selector=self._SELECTORS["card"])
-            if not html:
-                logger.warning("클래스101 페이지 응답 없음")
-                return collected
-            items = self.parse_lectures(html)
-            if items:
-                await self.save_to_db(items)  # → queries.upsert_lecture()
-                collected.extend(items)
-            logger.info(f"클래스101 크롤링 완료: {len(collected)}건")
-        finally:
-            await self.close()
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            )
+            ctx = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+            )
+            page = await ctx.new_page()
+            try:
+                categories = await self._get_all_categories(page)
+                logger.info(f"클래스101 카테고리: {len(categories)}개")
+
+                for cat_name, cat_url in categories:
+                    logger.info(f"클래스101 크롤링: {cat_name}")
+                    try:
+                        items = await self._crawl_category(page, cat_name, cat_url)
+                        for item in items:
+                            try:
+                                if item.get("instructor_name"):
+                                    upsert_instructor(item["instructor_name"], self.PLATFORM)
+                                upsert_lecture(LectureCreate(**item))
+                                collected.append(item)
+                            except Exception as e:
+                                logger.error(f"클래스101 DB 저장 실패: {item.get('title')} — {e}")
+                        logger.info(f"  {cat_name}: {len(items)}건")
+                        await asyncio.sleep(random.uniform(1.5, 2.5))
+                    except Exception as e:
+                        logger.error(f"클래스101 {cat_name} 실패: {e}")
+            finally:
+                await browser.close()
+
+        logger.info(f"클래스101 완료: {len(collected)}건")
         return collected
 
-    def parse_lectures(self, html: str) -> list[dict]:
-        """목록 HTML에서 강의 카드들을 파싱해 LectureCreate 호환 dict 리스트 반환."""
-        soup = BeautifulSoup(html, "html.parser")
-        cards = soup.select(self._SELECTORS["card"])
-        lectures: list[dict] = []
+    async def _get_all_categories(self, page) -> list[tuple[str, str]]:
+        try:
+            await page.goto("https://class101.net/ko/categories", wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(4000)
+
+            cats = await page.eval_on_selector_all(
+                'a[href*="/ko/categories/"]',
+                'els => [...new Map(els.map(e => [e.href.split("?")[0], {text: e.innerText.trim(), href: e.href.split("?")[0]}])).values()]'
+            )
+            result = []
+            seen = set()
+            for c in cats:
+                text = c["text"].strip()
+                href = c["href"]
+                if not text or href in seen or len(text) < 2:
+                    continue
+                seen.add(href)
+                result.append((text, href))
+            return result if result else list(TOP_CATEGORIES)
+        except Exception as e:
+            logger.warning(f"클래스101 카테고리 목록 수집 실패, fallback 사용: {e}")
+            return list(TOP_CATEGORIES)
+
+    async def _crawl_category(self, page, cat_name: str, cat_url: str) -> list[dict]:
+        await page.goto(cat_url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(3000)
+
+        for _ in range(5):
+            await page.keyboard.press("End")
+            await page.wait_for_timeout(1000)
+
+        cards = await page.query_selector_all('a[href*="/ko/products/"]')
+        items = []
+        seen = set()
+
         for card in cards:
             try:
-                lecture = self._parse_card(card)
-                if lecture and lecture.get("title"):
-                    lectures.append(lecture)
+                item = await self._parse_card(card, cat_name)
+                if item and item.get("url") not in seen:
+                    seen.add(item["url"])
+                    items.append(item)
             except Exception as e:
-                logger.error(f"클래스101 카드 파싱 실패 — {e}")
-        return lectures
+                logger.error(f"클래스101 카드 파싱 오류: {e}")
 
-    def _parse_card(self, card) -> dict:
-        price, is_free = parse_lecture_price(self._text(card, "price"))
+        return items
 
-        link_el = card.select_one(self._SELECTORS["link"])
-        url = self._abs_url(link_el.get("href")) if link_el else None
+    async def _parse_card(self, card, category: str) -> Optional[dict]:
+        href = await card.get_attribute("href")
+        if not href:
+            return None
+        url = f"https://class101.net{href}" if href.startswith("/") else href
+        url = url.split("?")[0]
 
-        img_el = card.select_one(self._SELECTORS["thumbnail"])
-        thumbnail_url = (img_el.get("src") or img_el.get("data-src")) if img_el else None
+        text = (await card.inner_text()).strip()
+        if not text:
+            return None
 
-        tags = [t.get_text(strip=True) for t in card.select(self._SELECTORS["tag"]) if t.get_text(strip=True)]
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        if not lines:
+            return None
+
+        # 텍스트 구조: "순위\n제목\n재료태그 | 강사명" 또는 "제목\n재료태그 | 강사명"
+        if lines[0].isdigit():
+            title = lines[1] if len(lines) > 1 else ""
+            remaining = lines[2:]
+        else:
+            title = lines[0]
+            remaining = lines[1:]
+
+        if not title or len(title) < 2:
+            return None
+
+        # 강사명 추출 — "재료태그 | 강사명" 패턴
+        instructor = None
+        for line in remaining:
+            if "|" in line:
+                parts = line.split("|")
+                candidate = parts[-1].strip()
+                if 1 < len(candidate) <= 30:
+                    instructor = candidate
+                break
+        if not instructor and remaining:
+            last = remaining[-1]
+            if 1 < len(last) <= 20 and not any(c.isdigit() for c in last):
+                instructor = last
+
+        price, is_free = self._extract_price(text)
+
+        img_el = await card.query_selector("img")
+        thumbnail = await img_el.get_attribute("src") if img_el else None
+        if thumbnail and "cdn.class101.net" not in thumbnail:
+            thumbnail = None
 
         return {
             "platform": self.PLATFORM,
-            "title": self._text(card, "title"),
-            "instructor_name": self._text(card, "instructor") or None,
-            "category": self._text(card, "category") or None,
+            "title": title[:200],
+            "instructor_name": instructor,
+            "category": category,
             "price": price,
-            "rating": None,            # 비로그인 미수집
-            "student_count": None,     # 로그인 필요 → 미수집
+            "rating": None,
+            "student_count": None,
             "url": url,
-            "thumbnail_url": thumbnail_url,
-            "tags": tags or None,
+            "thumbnail_url": thumbnail,
+            "tags": None,
             "is_free": is_free,
         }
 
-    # ── 파싱 헬퍼 ────────────────────────────────────────────
-
-    def _text(self, card, key: str) -> str:
-        el = card.select_one(self._SELECTORS[key])
-        return el.get_text(strip=True) if el else ""
-
     @staticmethod
-    def _abs_url(href: Optional[str]) -> Optional[str]:
-        if not href:
-            return None
-        if href.startswith("http"):
-            return href
-        return f"https://class101.net{href}"
+    def _extract_price(text: str) -> tuple[Optional[int], bool]:
+        if "무료" in text or "FREE" in text.upper():
+            return 0, True
+        m = re.search(r"([\d,]+)\s*원", text)
+        if m:
+            return int(m.group(1).replace(",", "")), False
+        return None, False

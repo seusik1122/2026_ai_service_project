@@ -12,4 +12,19 @@ export interface Lecture {
   tags?: string[];
   is_free: boolean;
   trust_score?: number;
+  roadmap_step?: number | null;
+  description?: string;
+  curriculum?: string;
+  level?: string;
+  keywords?: string[];
+  reason?: string;
+  pros?: string[];
+  diff?: string;
+  fit_score?: number;
+  caution?: string;
+}
+
+export interface StepGroup {
+  step: number;
+  candidates: Lecture[];
 }

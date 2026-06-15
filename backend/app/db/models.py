@@ -8,7 +8,7 @@ class LectureCreate(BaseModel):
     title: str
     instructor_name: Optional[str] = None
     category: Optional[str] = None
-    price: int = 0
+    price: Optional[int] = None
     rating: Optional[float] = None
     student_count: Optional[int] = None
     url: Optional[str] = None

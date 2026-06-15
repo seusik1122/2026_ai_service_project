@@ -1,0 +1,21 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - ./backend/.env
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: http://localhost:8000
+        VITE_INTERNAL_API_KEY: ${VITE_INTERNAL_API_KEY:-my-secret-1234}
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped

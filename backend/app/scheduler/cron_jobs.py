@@ -17,6 +17,7 @@ from app.collectors.qnet_api import collect_qnet_exams
 from app.db.supabase_client import supabase
 from app.db.queries import update_exam_dday
 from app.utils.logger import logger
+from app.api.zapier_webhook import trigger_dday_alerts, trigger_trust_score_alerts
 
 scheduler = AsyncIOScheduler()
 
@@ -53,13 +54,36 @@ async def collect_all_reviews() -> None:
             logger.error(f"후기 수집 실패: {name} — {e}")
 
 
+async def run_dday_and_notify() -> None:
+    """D-day 갱신 후 D-7 이하 시험 Zapier 이메일 발송."""
+    try:
+        await asyncio.to_thread(update_exam_dday)
+    except Exception as e:
+        logger.error(f"D-day 갱신 실패: {e}")
+    try:
+        sent = await trigger_dday_alerts()
+        logger.info(f"D-day 알림 발송: {sent}건")
+    except Exception as e:
+        logger.error(f"D-day 알림 실패: {e}")
+
+
+async def run_trust_score_check() -> None:
+    """주간 신뢰도 급변 강사 감지 → Zapier 이메일 발송."""
+    try:
+        sent = await trigger_trust_score_alerts()
+        logger.info(f"신뢰도 급변 알림 발송: {sent}건")
+    except Exception as e:
+        logger.error(f"신뢰도 급변 알림 실패: {e}")
+
+
 def register_jobs(sched: AsyncIOScheduler = scheduler) -> AsyncIOScheduler:
-    """스케줄러에 주기 작업을 등록(시작은 하지 않음). 테스트 가능하도록 분리."""
-    sched.add_job(run_all_crawlers, "cron", hour=0, minute=0, id="crawlers", replace_existing=True)
-    sched.add_job(update_exam_dday, "cron", hour=0, minute=5, id="dday", replace_existing=True)
-    sched.add_job(collect_kmooc_lectures, "cron", hour=0, minute=30, id="kmooc", replace_existing=True)
-    sched.add_job(collect_qnet_exams, "cron", hour=1, minute=0, id="qnet", replace_existing=True)
-    sched.add_job(collect_all_reviews, "cron", hour=2, minute=0, id="reviews", replace_existing=True)
+    sched.add_job(run_all_crawlers,      "cron", hour=0,  minute=0,  id="crawlers",   replace_existing=True)
+    sched.add_job(run_dday_and_notify,   "cron", hour=0,  minute=5,  id="dday",       replace_existing=True)
+    sched.add_job(collect_kmooc_lectures,"cron", hour=0,  minute=30, id="kmooc",      replace_existing=True)
+    sched.add_job(collect_qnet_exams,    "cron", hour=1,  minute=0,  id="qnet",       replace_existing=True)
+    sched.add_job(collect_all_reviews,   "cron", hour=2,  minute=0,  id="reviews",    replace_existing=True)
+    sched.add_job(run_trust_score_check, "cron", day_of_week="mon", hour=9, minute=0,
+                  id="trust_alert", replace_existing=True)
     return sched
 
 

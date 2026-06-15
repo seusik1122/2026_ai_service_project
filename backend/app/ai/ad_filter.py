@@ -27,7 +27,7 @@ async def filter_ad(content: str) -> dict:
     """
     try:
         response = await _get_client().chat.completions.create(
-            model="gpt-5.4-mini",
+            model="gpt-5.5",
             max_completion_tokens=100,
             response_format={"type": "json_object"},
             messages=[

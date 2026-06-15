@@ -21,6 +21,8 @@ PUBLIC_PATHS = ["/docs", "/openapi.json", "/redoc", "/health"]
 
 @app.middleware("http")
 async def api_key_middleware(request: Request, call_next):
+    if request.method == "OPTIONS":
+        return await call_next(request)
     if any(request.url.path.startswith(p) for p in PUBLIC_PATHS):
         return await call_next(request)
     api_key = request.headers.get("X-API-Key")
@@ -32,9 +34,10 @@ async def api_key_middleware(request: Request, call_next):
 async def health_check():
     return {"status": "ok"}
 
-from app.api import lectures, instructors, reviews, exams, zapier_webhook
+from app.api import lectures, instructors, reviews, exams, zapier_webhook, recommend
 app.include_router(lectures.router, prefix="/api")
 app.include_router(instructors.router, prefix="/api")
 app.include_router(reviews.router, prefix="/api")
 app.include_router(exams.router, prefix="/api")
 app.include_router(zapier_webhook.router, prefix="/api")
+app.include_router(recommend.router, prefix="/api")

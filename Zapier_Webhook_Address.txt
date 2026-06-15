@@ -1,7 +1,0 @@
-day_alert : https://hooks.zapier.com/hooks/catch/26788151/4bolhv0/
-
-new_lecture_alert : https://hooks.zapier.com/hooks/catch/26788151/4bolr62/
-
-trust_score_alert : https://hooks.zapier.com/hooks/catch/26788151/4bolsmd/
-
-form_to_db : https://hooks.zapier.com/hooks/catch/26788151/4bol89e/

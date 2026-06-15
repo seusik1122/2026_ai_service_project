@@ -7,11 +7,22 @@ from app.db.models import LectureCreate, ReviewCreate, InstructorUpdate, ExamCre
 
 def upsert_lecture(data: LectureCreate) -> dict:
     """강의 저장. url 기준으로 중복 방지 (upsert)"""
+    payload = data.model_dump()
+    if payload.get("price") is None:
+        payload["price"] = 0
     result = supabase.table("lectures").upsert(
-        data.model_dump(),
+        payload,
         on_conflict="url"
     ).execute()
     return result.data
+
+
+def enrich_lecture(lecture_id: int, fields: dict) -> None:
+    """강의 보강 데이터 부분 업데이트. None 값은 건너뜀."""
+    payload = {k: v for k, v in fields.items() if v is not None}
+    if not payload:
+        return
+    supabase.table("lectures").update(payload).eq("id", lecture_id).execute()
 
 
 def get_lectures(
@@ -34,6 +45,70 @@ def get_lectures(
         query = query.eq("platform", platform)
     query = query.order(sort, desc=True).limit(limit)
     return query.execute().data
+
+
+def search_lectures_multi(
+    keywords: list[str] = None,
+    categories: list[str] = None,
+    is_free: bool = None,
+    platforms: list[str] = None,
+    max_price: int = None,
+    sort: str = "student_count",
+    limit: int = 20,
+) -> list[dict]:
+    """
+    OR 검색: 다중 키워드를 단일 쿼리의 or_() 조건으로 묶어 실행.
+    카테고리는 후처리 스코어링으로 관련 항목 우선 노출.
+    """
+    valid_sort = sort if sort in ("rating", "student_count", "price") else "student_count"
+    kw_list = [kw for kw in (keywords or []) if kw][:5]
+
+    def _fetch(plat_filter=None, extra_limit=60) -> list[dict]:
+        q = supabase.table("lectures").select("*")
+        if kw_list:
+            or_filter = ",".join(f"title.ilike.%{kw}%" for kw in kw_list)
+            q = q.or_(or_filter)
+        if is_free is not None:
+            q = q.eq("is_free", is_free)
+        if max_price is not None:
+            q = q.lte("price", max_price)
+        if plat_filter:
+            q = q.in_("platform", plat_filter)
+        q = q.order(valid_sort, desc=(valid_sort != "price")).limit(extra_limit)
+        return q.execute().data
+
+    if platforms:
+        rows = _fetch(plat_filter=platforms, extra_limit=60)
+    else:
+        # 유튜브 쏠림 방지: 유튜브 최대 10개 + 나머지 플랫폼 50개 합산
+        NON_YOUTUBE = ["inflearn","fastcampus","class101","coloso","hackers",
+                       "siwonschool","yanadoo","megastudy","ebsi","opentutorials","codeit"]
+        yt_rows = _fetch(plat_filter=["youtube"], extra_limit=10)
+        other_rows = _fetch(plat_filter=NON_YOUTUBE, extra_limit=50)
+        seen_ids: set = set()
+        rows = []
+        for r in other_rows + yt_rows:
+            if r["id"] not in seen_ids:
+                seen_ids.add(r["id"])
+                rows.append(r)
+
+    # 후처리: 원본 키워드 매칭 강도 + 카테고리 가중치로 정렬
+    cat_set = set(categories or [])
+    primary_kws = [kw.lower() for kw in (kw_list[:2] if kw_list else [])]  # 첫 2개가 핵심 키워드
+
+    def _sort_key(x: dict) -> tuple:
+        title = (x.get("title") or "").lower()
+        # 핵심 키워드가 제목에 포함된 개수 (많을수록 관련성 높음)
+        kw_match = sum(1 for kw in primary_kws if kw in title)
+        in_cat = 1 if (cat_set and x.get("category") in cat_set) else 0
+        if valid_sort == "rating":
+            return (kw_match, in_cat, x.get("rating") or 0, x.get("student_count") or 0)
+        elif valid_sort == "price":
+            return (kw_match, in_cat, -(x.get("price") or 0))
+        return (kw_match, in_cat, x.get("student_count") or 0)
+
+    rows.sort(key=_sort_key, reverse=(valid_sort != "price"))
+    return rows[:limit]
 
 
 # ── reviews 테이블 ───────────────────────────────────────
