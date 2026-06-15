@@ -8,9 +8,14 @@ load_dotenv()
 
 app = FastAPI(title="강의 추천 API")
 
+_frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+_allow_origins = ["http://localhost:5173", "http://localhost:3000"]
+if _frontend_url not in _allow_origins:
+    _allow_origins.append(_frontend_url)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[os.getenv("FRONTEND_URL", "http://localhost:5173")],
+    allow_origins=_allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
